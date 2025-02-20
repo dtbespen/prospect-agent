@@ -50,28 +50,13 @@ Analyser disse personene for å finne de som har rollen: {role}.
 Personer å vurdere:
 {users}
 
-VIKTIG: Returner et JSON-objekt som følger PriorityAnalysis modellen.
-Eksempel struktur:
-{example}
+VIKTIG: Returner en liste som følger PriorityAnalysis-modellen:
+{model_schema}
 
-For hver person, gjør en helhetlig vurdering basert på:
+Vurder hver person basert på:
+- Hvor godt nåværende rolle matcher målrollen
+- Tydelighet i rollebeskrivelsen
+- Relevans av arbeidssted/bransje
 
-KRITISKE FAKTORER:
-- Rolle-match: Har personen en stilling/tittel som matcher målrollen vi leter etter?
-- LinkedIn-profil: Må ha en gyldig LinkedIn URL for videre verifisering
-- Data-kvalitet: Vurder confidence-score og mengde tilgjengelig informasjon
-
-VURDERING:
-- Gi en score fra 0.0 til 1.0 basert på hvor godt nåværende rolle matcher
-- Høyere score til personer som har en rolle/tittel som direkte matcher det vi leter etter
-- Lavere score til personer med roller som er uklare eller ikke relevante
-- Personer uten LinkedIn-profil skal automatisk få score 0.0
-
-Returner de {max_results} mest relevante personene.
-
-NB: 
-- Vi leter etter personer som HAR denne rollen nå, ikke potensielle kandidater
-- Prioriter direkte rolle-match over andre faktorer
-- Begrunn tydelig hvorfor hver persons nåværende rolle er relevant
-- Skriv all begrunnelse på norsk
+Returner maksimalt {max_results} personer, sortert etter score.
 """ 

@@ -1,5 +1,5 @@
 from typing import Dict, Optional, List
-from langchain_core.tools import StructuredTool
+from langchain_core.tools import StructuredTool, BaseTool
 from pydantic import BaseModel, Field
 import requests
 import os
@@ -52,11 +52,10 @@ def get_linkedin_profile(linkedin_url: str) -> Dict:
 
 # Definer LinkedIn tool
 linkedin_tool = StructuredTool(
-    name="get_linkedin_profile",
-    description="Henter og validerer LinkedIn profil data",
+    name="linkedin",
+    description="Henter LinkedIn data",
     func=get_linkedin_profile,
-    args_schema=LinkedInInput,
-    return_type=LinkedInRawData
+    args_schema=LinkedInInput
 )
 
 def get_hunter_data(domain: str, api_key: str, offset: int = 0, limit: int = 50) -> Dict:
@@ -87,11 +86,10 @@ def get_hunter_data(domain: str, api_key: str, offset: int = 0, limit: int = 50)
     except requests.RequestException as e:
         raise HunterAPIError(f"Hunter API error: {str(e)}")
 
-# Oppdater Hunter tool med ny input/output
+# Oppdater Hunter tool
 hunter_tool = StructuredTool(
-    name="get_hunter_data",
-    description="Henter brukerdata fra Hunter.io med paginering",
+    name="hunter",
+    description="Henter kontaktinfo",
     func=get_hunter_data,
-    args_schema=HunterInput,
-    return_type=HunterResponse
+    args_schema=HunterInput
 ) 

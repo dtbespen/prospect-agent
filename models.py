@@ -28,11 +28,21 @@ class UserBase(BaseModel):
 
 class LinkedInRawData(BaseModel):
     """Rå data fra LinkedIn API"""
-    """
-    Generisk container for LinkedIn data.
-    LLM vil mappe rå API-data til denne strukturen.
-    """
-    data: Dict[str, Any] = Field(description="Rå data fra LinkedIn API")
+    about: Optional[str] = None
+    city: Optional[str] = None
+    connections: Optional[int] = None
+    country: Optional[str] = None
+    current_company: Optional[str] = None
+    current_job_title: Optional[str] = None
+    education: Optional[List[Dict]] = None
+    experiences: Optional[List[Dict]] = None
+    full_name: Optional[str] = None
+    headline: Optional[str] = None
+    profile_pic_url: Optional[str] = None
+    public_identifier: Optional[str] = None
+    
+    class Config:
+        extra = "allow"  # Tillat ekstra felter fra API-responsen
 
 class LinkedInAnalysis(BaseModel):
     """Analyse av LinkedIn profil"""
@@ -112,6 +122,12 @@ class HunterResponse(BaseModel):
     emails: List[dict] = Field(..., description="Liste over e-poster")
     meta: dict = Field(..., description="Metadata inkludert antall sider")
 
+class PriorityUser(BaseModel):
+    """Prioritert bruker med score og begrunnelse"""
+    email: str = Field(..., description="Brukerens email")
+    score: float = Field(..., description="Prioriteringsscore (0-1)")
+    reason: str = Field(..., description="Begrunnelse for score")
+
 class PriorityAnalysis(BaseModel):
-    """Analyse av brukers egnethet for målrollen"""
-    users: Dict[str, dict] = Field(description="Dictionary med email som nøkkel og analyse som verdi") 
+    """Resultat av prioriteringsanalyse"""
+    users: List[PriorityUser] = Field(..., description="Liste over prioriterte brukere") 
