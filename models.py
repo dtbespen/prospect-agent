@@ -47,6 +47,7 @@ class LinkedInAnalysis(BaseModel):
     company: Optional[str] = Field(None, description="Nåværende selskap")
     company_industry: Optional[str] = Field(None, description="Selskapets bransje")
     years_in_role: Optional[int] = Field(None, description="Antall år i nåværende rolle")
+    years_in_company: Optional[int] = Field(None, description="Antall år i nåværende selskap")
     
     # Erfaring
     total_experience_years: Optional[int] = Field(None, description="Totalt antall års erfaring")
