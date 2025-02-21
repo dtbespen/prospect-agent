@@ -1,62 +1,88 @@
+from typing import Type, Dict, Any
 import json
-from models import LinkedInAnalysis, PriorityAnalysis, LinkedInRawData
+from pydantic import BaseModel
+from models import (
+    User, BasicInfo, CareerInfo, ExpertiseInfo, 
+    EducationInfo, NetworkInfo, PersonalityInfo, MetaInfo
+)
 
-def get_example_linkedin_analysis():
-    """Generer et eksempel basert på LinkedInAnalysis modellen"""
-    return {
-        field: field_info.description or "Eksempel verdi"
-        for field, field_info in LinkedInAnalysis.model_fields.items()
-    }
+def get_model_schema(model_class: Type[BaseModel]) -> str:
+    """Henter JSON schema for en modell i lesbart format"""
+    schema = model_class.model_json_schema()
+    return json.dumps(schema, indent=2, ensure_ascii=False)
 
-def get_example_priority_analysis():
-    """Generer et eksempel basert på PriorityAnalysis modellen"""
-    return {
-        "users": {
-            "person@example.com": {
-                "score": 0.85,
-                "reason": "Detaljert begrunnelse på norsk"
-            }
-        }
-    }
+def get_nested_field_descriptions(model_class: Type[BaseModel]) -> str:
+    """Henter feltbeskrivelser for en modell med sub-modeller"""
+    descriptions = []
+    for field_name, field_info in model_class.model_fields.items():
+        if hasattr(field_info.annotation, 'model_fields'):
+            descriptions.append(f"\n{field_name.upper()}:")
+            sub_model = field_info.annotation
+            for sub_field, sub_info in sub_model.model_fields.items():
+                desc = sub_info.description or "Ingen beskrivelse tilgjengelig"
+                descriptions.append(f"- {sub_field}: {desc}")
+        else:
+            desc = field_info.description or "Ingen beskrivelse tilgjengelig"
+            descriptions.append(f"- {field_name}: {desc}")
+    return "\n".join(descriptions)
 
-LINKEDIN_ANALYSIS_PROMPT = """
-Analyser denne LinkedIn profilen og map dataen til følgende modell:
+def validate_llm_output(output: str, model_class: Type[BaseModel]) -> Dict[str, Any]:
+    """Validerer og konverterer LLM output mot modell"""
+    try:
+        data = json.loads(output)
+        validated = model_class(**data)
+        return validated.model_dump()
+    except Exception as e:
+        raise ValueError(f"Ugyldig output format: {str(e)}")
 
-{model_schema}
+# Mapping mellom analysetype og modell
+ANALYSIS_MODELS = {
+    "basic": BasicInfo,
+    "career": CareerInfo,
+    "expertise": ExpertiseInfo,
+    "education": EducationInfo,
+    "network": NetworkInfo,
+    "personality": PersonalityInfo,
+    "meta": MetaInfo
+}
 
-Rå LinkedIn data:
-{linkedin_data}
+ANALYSIS_PROMPT = """
+Analyser denne profilen for {analysis_type} med fokus på B2B-salgspotensial.
 
-Målrolle som skal vurderes:
+PROFIL:
+{raw_profile}
+
+TILGJENGELIG DATA:
+{optional_data}
+
+ANALYSER FØLGENDE ASPEKTER:
+{field_descriptions}
+
+MÅLROLLE/PRODUKT:
 {target_role}
 
-VIKTIG:
-- Returner et JSON-objekt som følger modellen over
-- Bruk alle tilgjengelige felter fra rådataen
-- Behold original datatype (int, string, etc.)
-Instruksjoner for mapping:
-- Beregn years_in_role basert på current_job_duration eller start_year/month
-- Beregn total_experience_years ved å summere varighet av alle experiences
-- Utled seniority_level basert på erfaring og roller (junior/senior/lead/etc.)
-- Sett role_relevance til en score mellom 0-1 basert på match med målrollen
-- Lag en kort, presis overall_summary på norsk
-- Inkluder bare de mest relevante key_skills (maks 5)
-- List opp unike industries fra all erfaring
+OUTPUT FORMAT:
+Returner et JSON-objekt som følger denne modellen:
+{model_schema}
 """
 
-PRIORITY_ANALYSIS_PROMPT = """
-Analyser disse personene for å finne de som har rollen: {role}.
+PRIORITY_PROMPT = """
+Evaluer og prioriter disse prospektene for {target_role}.
 
-Personer å vurdere:
-{users}
+PROSPEKTER:
+{prospects}
 
-VIKTIG: Returner en liste som følger PriorityAnalysis-modellen:
+TILGJENGELIG DATA:
+{available_data}
+
+PRIORITERINGSKRITERIER:
+- Beslutningsmyndighet og innflytelse
+- Match mot målrollen/produktet
+- Timing og tilgjengelighet
+- Datakvalitet og aktualitet
+
+Returner en prioritert liste som følger denne modellen:
 {model_schema}
 
-Vurder hver person basert på:
-- Hvor godt nåværende rolle matcher målrollen
-- Tydelighet i rollebeskrivelsen
-- Relevans av arbeidssted/bransje
-
-Returner maksimalt {max_results} personer, sortert etter score.
+Maksimalt antall prioriterte prospekter: {max_results}
 """ 

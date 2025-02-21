@@ -1,49 +1,39 @@
-from typing import Annotated, List, Dict, Union, TypedDict, Any, Literal
-from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
+from typing import Annotated, List, Dict, Union, TypedDict, Any
+from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage, AIMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-from langgraph.graph import StateGraph, END, START
+from langgraph.graph import StateGraph
 from langchain_core.runnables import RunnableConfig
 from langsmith import traceable
 from langsmith.wrappers import wrap_openai
 from openai import OpenAI
-from pydantic import BaseModel, Field
 import json
 import os
 from dotenv import load_dotenv
 from tools import linkedin_tool, hunter_tool
 from prompts import (
-    LINKEDIN_ANALYSIS_PROMPT, 
-    PRIORITY_ANALYSIS_PROMPT,
-    get_example_linkedin_analysis,
-    get_example_priority_analysis
+    ANALYSIS_PROMPT, 
+    PRIORITY_PROMPT,
+    ANALYSIS_MODELS, 
+    validate_llm_output,
+    get_model_schema, 
+    get_nested_field_descriptions
 )
 from models import (
-    UserBase, 
-    LinkedInAnalysis, 
     SearchConfig, 
-    AgentState, 
-    LinkedInRawData, 
-    EnrichedUser, 
-    HunterResponse,
-    PriorityAnalysis
+    PriorityAnalysis,
+    User
 )
-from reducers import add_messages, add_users
-from langchain_core.tracers.langchain import wait_for_all_tracers
-from langchain_core.tracers import ConsoleCallbackHandler
-from langchain_core.callbacks import CallbackManager
 import logging
 from langgraph.prebuilt import ToolNode, tools_condition
+from langchain.prompts import ChatPromptTemplate
+from system_prompts import ANALYSIS_SYSTEM_PROMPT, PRIORITY_SYSTEM_PROMPT
 
 load_dotenv()
 
-# Konfigurer logging enda strengere
+# Konfigurer logging
 logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# Deaktiver logging for flere moduler
-logging.getLogger('langchain').setLevel(logging.ERROR)
-logging.getLogger('langchain_core').setLevel(logging.ERROR)
-logging.getLogger('langchain_openai').setLevel(logging.ERROR)
-logging.getLogger('openai').setLevel(logging.ERROR)
+for logger in ['langchain', 'langchain_core', 'langchain_openai', 'openai']:
+    logging.getLogger(logger).setLevel(logging.ERROR)
 
 # Configs
 DEFAULT_MODEL = "gpt-4o-mini"
@@ -56,15 +46,37 @@ openai_client = wrap_openai(OpenAI())
 MessageList = Annotated[List[BaseMessage], "messages"]
 UserList = Annotated[List[Dict], "users"]
 
-# Nåværende implementering
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], "messages"]
     users: Annotated[List[Dict], "users"]
     config: SearchConfig
 
-# 3. SCREENING NODE (FØRSTE STEG)
+# Opprett LLM instans
+llm = ChatOpenAI(
+    model_name=os.getenv("MODEL_NAME", DEFAULT_MODEL),
+    temperature=float(os.getenv("TEMPERATURE", DEFAULT_TEMPERATURE))
+)
+
+# Legg til på toppen av filen, etter imports
+def add_users(state: Dict, new_state: Dict) -> Dict:
+    """Reducer for å oppdatere users i state"""
+    state["users"] = new_state.get("users", state["users"])
+    return state
+
+def add_messages(state: Dict, new_state: Dict) -> Dict:
+    """Reducer for å oppdatere messages i state"""
+    state["messages"].extend(new_state.get("messages", []))
+    return state
+
+# Definer state updates
+def update_state(state: Dict, new_state: Dict) -> Dict:
+    """Oppdaterer state med nye verdier"""
+    state.update(new_state)
+    return state
+
+# SCREENING NODE
 @traceable(run_type="chain", name="hunter_collection")
-def collect_hunter_data(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+def collect_hunter_data(state: AgentState, config: RunnableConfig) -> AgentState:
     """Henter kontakter fra Hunter.io"""
     try:
         hunter_data = hunter_tool.invoke({
@@ -86,95 +98,98 @@ def collect_hunter_data(state: AgentState, config: RunnableConfig) -> Dict[str, 
         ]
         
         return {
-            "messages": [
+            "messages": state["messages"] + [
                 ToolMessage(
                     tool_call_id="hunter_success",
                     tool_name="hunter",
                     content=f"Hentet {len(users)} kontakter"
                 )
             ],
-            "users": users
+            "users": users,
+            "config": state["config"]
         }
     except Exception as e:
         return {
-            "messages": [
+            "messages": state["messages"] + [
                 ToolMessage(
                     tool_call_id="hunter_error",
                     tool_name="hunter",
                     content=f"Feil: {str(e)}"
                 )
             ],
-            "users": []
+            "users": [],
+            "config": state["config"]
         }
 
-# 4. PRIORITERING NODE (ANDRE STEG)
+# PRIORITERING NODE
 @traceable(run_type="chain", name="prioritize_users")
-def prioritize_users(state: AgentState, config: RunnableConfig) -> Dict[str, Union[MessageList, UserList]]:
+def prioritize_users(state: AgentState, config: RunnableConfig) -> AgentState:
     """Prioriterer brukere basert på deres egnethet for målrollen."""
-    
     users_with_roles = [u for u in state["users"] if u.get("role")]
     
     if not users_with_roles:
         return {
-            "messages": [HumanMessage(content="Ingen brukere med roller funnet")],
-            "users": []
+            "messages": state["messages"] + [HumanMessage(content="Ingen brukere med roller funnet")],
+            "users": [],
+            "config": state["config"]
         }
     
-    model = ChatOpenAI(
-        model=DEFAULT_MODEL,
-        temperature=DEFAULT_TEMPERATURE
-    ).with_structured_output(PriorityAnalysis)
-    
-    analysis = model.invoke(
-        PRIORITY_ANALYSIS_PROMPT.format(
-            role=state['config']['target_role'],
-            users=json.dumps(users_with_roles, indent=2),
-            max_results=state['config'].get('max_results', 5),
-            model_schema=json.dumps(PriorityAnalysis.model_json_schema(), indent=2)
-        )
-    )
-    
-    # Lag dictionary av analysene med email som nøkkel
-    analysis_by_email = {
-        priority_user.email: priority_user 
-        for priority_user in analysis.users
-    }
-    
-    # Match brukere med deres analyse
-    prioritized = []
-    for user in users_with_roles:
-        if user["email"] in analysis_by_email:
-            priority_user = analysis_by_email[user["email"]]
-            prioritized.append({
-                **user,
-                "priority_score": priority_user.score,
-                "priority_reason": priority_user.reason,
-                "sources": user["sources"] + ["prioritized"]
-            })
-    
-    return {
-        "messages": [HumanMessage(content=f"Prioriterte {len(prioritized)} brukere")],
-        "users": prioritized
-    }
+    try:
+        # Formater meldinger direkte
+        messages = [
+            SystemMessage(content=PRIORITY_SYSTEM_PROMPT),
+            HumanMessage(content=PRIORITY_PROMPT.format(
+                target_role=state['config']['target_role'],
+                prospects=json.dumps(users_with_roles, indent=2),
+                available_data=json.dumps({"domain": state['config']['domain']}, indent=2),
+                model_schema=get_model_schema(PriorityAnalysis),
+                max_results=state['config'].get('max_results', 5)
+            ))
+        ]
+        response = llm.invoke(messages)
+        analysis = PriorityAnalysis(**json.loads(response.content))
+        
+        # Match og oppdater brukere
+        prioritized = []
+        for user in users_with_roles:
+            if user["email"] in {p.email for p in analysis.users}:
+                priority_user = next(p for p in analysis.users if p.email == user["email"])
+                prioritized.append({
+                    **user,
+                    "priority_score": priority_user.score,
+                    "priority_reason": priority_user.reason,
+                    "sources": user["sources"] + ["prioritized"]
+                })
+        
+        return {
+            "messages": state["messages"] + [
+                AIMessage(content=f"Prioriterte {len(prioritized)} brukere")
+            ],
+            "users": prioritized,
+            "config": state["config"]
+        }
+    except Exception as e:
+        logging.error(f"Feil i prioritering: {str(e)}")
+        return {
+            "messages": state["messages"] + [HumanMessage(content=f"Feil i prioritering: {str(e)}")],
+            "users": state["users"],
+            "config": state["config"]
+        }
 
-@traceable(run_type="chain", name="get_linkedin_info")
-def get_linkedin_info(state: AgentState, config: RunnableConfig) -> Dict[str, Union[MessageList, UserList]]:
-    """Beriker prioriterte brukere med LinkedIn data."""
-    
+# LINKEDIN DATA NODE
+@traceable(run_type="chain", name="get_linkedin_data")
+def get_linkedin_data(state: AgentState, config: RunnableConfig) -> AgentState:
+    """Henter LinkedIn data for prioriterte brukere."""
     prioritized_users = [u for u in state["users"] 
                         if "prioritized" in u.get("sources", [])
                         and u.get("linkedin_url")]
     
     if not prioritized_users:
         return {
-            "messages": [HumanMessage(content="Ingen brukere å berike")],
-            "users": state["users"]
+            "messages": state["messages"] + [HumanMessage(content="Ingen brukere å berike")],
+            "users": state["users"],
+            "config": state["config"]
         }
-    
-    model = ChatOpenAI(
-        model=DEFAULT_MODEL,
-        temperature=DEFAULT_TEMPERATURE
-    ).with_structured_output(LinkedInAnalysis)
     
     enriched = []
     messages = []
@@ -182,27 +197,17 @@ def get_linkedin_info(state: AgentState, config: RunnableConfig) -> Dict[str, Un
     for user in prioritized_users:
         try:
             linkedin_data = linkedin_tool.invoke({"linkedin_url": user["linkedin_url"]})
-            analysis = model.invoke(
-                LINKEDIN_ANALYSIS_PROMPT.format(
-                    model_schema=json.dumps(LinkedInAnalysis.model_json_schema(), indent=2),
-                    linkedin_data=json.dumps(linkedin_data["data"], indent=2),
-                    target_role=state['config']['target_role']
-                )
-            )
-            
             enriched_user = {
                 **user,
                 "linkedin_raw": linkedin_data["data"],
-                "linkedin_analysis": analysis.dict(),
-                "sources": user["sources"] + ["linkedin_analyzed"]
+                "sources": user["sources"] + ["linkedin"]
             }
             enriched.append(enriched_user)
-            
             messages.append(
                 ToolMessage(
                     tool_call_id=f"linkedin_{user['email']}",
                     tool_name="linkedin",
-                    content=f"Beriket {user['email']}"
+                    content=f"Hentet LinkedIn data for {user['email']}"
                 )
             )
         except Exception as e:
@@ -215,20 +220,78 @@ def get_linkedin_info(state: AgentState, config: RunnableConfig) -> Dict[str, Un
             )
     
     return {
-        "messages": messages,
-        "users": enriched or state["users"]
+        "messages": state["messages"] + messages,
+        "users": enriched or state["users"],
+        "config": state["config"]
     }
 
-def handle_error(state: AgentState, error: Exception) -> Dict:
-    """Enkel feilhåndtering"""
-    return {
-        "messages": [
-            ToolMessage(
-                tool_call_id="error",
-                tool_name="error_handler",
-                content=f"Feil oppstod: {str(error)}"
+# ANALYSE NODE
+@traceable(run_type="chain", name="analyze_profiles")
+def analyze_profiles(state: AgentState, config: RunnableConfig) -> AgentState:
+    """Analyserer LinkedIn profiler."""
+    users_to_analyze = [u for u in state["users"] 
+                       if "linkedin" in u.get("sources", [])]
+    
+    if not users_to_analyze:
+        return {
+            "messages": state["messages"] + [HumanMessage(content="Ingen profiler å analysere")],
+            "users": state["users"],
+            "config": state["config"]
+        }
+    
+    analyzed = []
+    messages = []
+    
+    for user in users_to_analyze:
+        try:
+            analysis_results = {}
+            profile_data = {**user, **user["linkedin_raw"]}
+            
+            for analysis_type, model_class in ANALYSIS_MODELS.items():
+                try:
+                    prompt = ChatPromptTemplate.from_messages([
+                        ("system", ANALYSIS_SYSTEM_PROMPT),
+                        ("human", ANALYSIS_PROMPT.format(
+                            analysis_type=analysis_type,
+                            raw_profile=json.dumps(profile_data, indent=2),
+                            optional_data="{}",
+                            field_descriptions=get_nested_field_descriptions(model_class),
+                            target_role=state["config"]["target_role"],
+                            model_schema=get_model_schema(model_class)
+                        ))
+                    ])
+                    response = llm.invoke(prompt)
+                    result = validate_llm_output(response.content, model_class)
+                    analysis_results[analysis_type] = result
+                except Exception as e:
+                    logging.error(f"Feil i {analysis_type} analyse: {str(e)}")
+            
+            analyzed_user = {
+                **user,
+                "analysis": analysis_results,
+                "sources": user["sources"] + ["analyzed"]
+            }
+            analyzed.append(analyzed_user)
+            messages.append(
+                ToolMessage(
+                    tool_call_id=f"analyze_{user['email']}",
+                    tool_name="analyze",
+                    content=f"Analyserte profil for {user['email']}"
+                )
             )
-        ]
+        except Exception as e:
+            messages.append(
+                ToolMessage(
+                    tool_call_id=f"analyze_error_{user['email']}",
+                    tool_name="analyze",
+                    content=f"Feil: {str(e)}"
+                )
+            )
+    
+    return {
+        "messages": state["messages"] + messages,
+        "users": analyzed or state["users"],
+        "config": state["config"]
     }
 
 # Oppdater workflow
@@ -236,15 +299,22 @@ def create_workflow() -> StateGraph:
     """Oppretter workflow."""
     workflow = StateGraph(AgentState)
     
-    # Legg til noder og tools
+    # Legg til noder
     workflow.add_node("collect", collect_hunter_data)
     workflow.add_node("prioritize", prioritize_users)
-    workflow.add_node("enrich", get_linkedin_info)
+    workflow.add_node("get_linkedin_data", get_linkedin_data)
+    workflow.add_node("analyze", analyze_profiles)
     workflow.add_node("tools", ToolNode([linkedin_tool, hunter_tool]))
     
+    # Sett entry point
+    workflow.set_entry_point("collect")
+    
     # Definer flyt
-    workflow.add_edge("__start__", "collect")
-    workflow.add_edge("tools", "enrich")
+    workflow.add_edge("collect", "prioritize")
+    workflow.add_edge("prioritize", "get_linkedin_data")
+    workflow.add_edge("get_linkedin_data", "analyze")
+    workflow.add_edge("analyze", "tools")
+    workflow.add_edge("tools", "analyze")
     
     # Betinget routing
     workflow.add_conditional_edges(
@@ -252,12 +322,14 @@ def create_workflow() -> StateGraph:
         lambda s: "prioritize" if s["users"] else "__end__"
     )
     workflow.add_conditional_edges(
-        "prioritize",
-        lambda s: "enrich" if any(u.get("priority_score", 0) > 0 
-                                 for u in s["users"]) else "__end__"
+        "analyze",
+        tools_condition,
+        {
+            "tools": "tools",
+            "__end__": "__end__"
+        }
     )
-    workflow.add_conditional_edges("enrich", tools_condition)
-    
+
     return workflow.compile()
 
 def get_config() -> RunnableConfig:
@@ -270,16 +342,20 @@ def get_config() -> RunnableConfig:
 # Compile workflow
 app = create_workflow()
 
-# Test
-if __name__ == "__main__":
-    result = app.invoke({
+def analyze_domain(
+    domain: str,
+    target_role: str,
+    max_results: int = 5
+) -> Dict[str, Any]:
+    """Kjør full analyse av et domene."""
+    return app.invoke({
         "messages": [],
         "users": [],
         "config": SearchConfig(
-            domain="documaster.com",
-            target_role="marketing",
-            max_results=3
+            domain=domain,
+            target_role=target_role,
+            max_results=max_results
         )
     })
 
-__all__ = ['app', 'get_config']  # Fjern User fra exports
+__all__ = ['app', 'get_config', 'analyze_domain']
