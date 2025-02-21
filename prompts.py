@@ -35,35 +35,19 @@ def validate_llm_output(output: str, model_class: Type[BaseModel]) -> Dict[str, 
     except Exception as e:
         raise ValueError(f"Ugyldig output format: {str(e)}")
 
-# Mapping mellom analysetype og modell
-ANALYSIS_MODELS = {
-    "basic": BasicInfo,
-    "career": CareerInfo,
-    "expertise": ExpertiseInfo,
-    "education": EducationInfo,
-    "network": NetworkInfo,
-    "personality": PersonalityInfo,
-    "meta": MetaInfo
-}
-
 ANALYSIS_PROMPT = """
-Analyser denne profilen for {analysis_type} med fokus på B2B-salgspotensial.
+Utfør en komplett analyse av denne profilen med fokus på B2B-salgspotensial.
 
 PROFIL:
 {raw_profile}
-
-TILGJENGELIG DATA:
-{optional_data}
-
-ANALYSER FØLGENDE ASPEKTER:
-{field_descriptions}
 
 MÅLROLLE/PRODUKT:
 {target_role}
 
 OUTPUT FORMAT:
-Returner et JSON-objekt som følger denne modellen:
+VIKTIG: Returner kun et gyldig JSON-objekt som følger denne modellen:
 {model_schema}
+
 """
 
 PRIORITY_PROMPT = """
@@ -81,8 +65,8 @@ PRIORITERINGSKRITERIER:
 - Timing og tilgjengelighet
 - Datakvalitet og aktualitet
 
-Returner en prioritert liste som følger denne modellen:
+VIKTIG: Returner kun et gyldig JSON-objekt som følger denne modellen:
 {model_schema}
 
-Maksimalt antall prioriterte prospekter: {max_results}
+max_results: {max_results}
 """ 

@@ -13,14 +13,13 @@ from tools import linkedin_tool, hunter_tool
 from prompts import (
     ANALYSIS_PROMPT, 
     PRIORITY_PROMPT,
-    ANALYSIS_MODELS, 
     validate_llm_output,
-    get_model_schema, 
-    get_nested_field_descriptions
+    get_model_schema,
 )
 from models import (
     SearchConfig, 
     PriorityAnalysis,
+    HunterResponse,
     User
 )
 import logging
@@ -84,6 +83,9 @@ def collect_hunter_data(state: AgentState, config: RunnableConfig) -> AgentState
             "api_key": os.getenv("HUNTER_API_KEY")
         })
         
+        # Valider response med HunterResponse modell
+        validated_data = HunterResponse(**hunter_data)
+        
         users = [
             {
                 "email": email["value"],
@@ -94,7 +96,7 @@ def collect_hunter_data(state: AgentState, config: RunnableConfig) -> AgentState
                 "confidence": str(email.get("confidence", "")),
                 "sources": ["hunter"]
             }
-            for email in hunter_data.get("emails", [])
+            for email in validated_data.emails
         ]
         
         return {
@@ -147,7 +149,10 @@ def prioritize_users(state: AgentState, config: RunnableConfig) -> AgentState:
             ))
         ]
         response = llm.invoke(messages)
-        analysis = PriorityAnalysis(**json.loads(response.content))
+        if isinstance(response, AIMessage):
+            analysis = PriorityAnalysis(**json.loads(response.content))
+        else:
+            raise ValueError(f"Uventet respons type: {type(response)}")
         
         # Match og oppdater brukere
         prioritized = []
@@ -244,49 +249,46 @@ def analyze_profiles(state: AgentState, config: RunnableConfig) -> AgentState:
     
     for user in users_to_analyze:
         try:
-            analysis_results = {}
             profile_data = {**user, **user["linkedin_raw"]}
             
-            for analysis_type, model_class in ANALYSIS_MODELS.items():
-                try:
-                    prompt = ChatPromptTemplate.from_messages([
-                        ("system", ANALYSIS_SYSTEM_PROMPT),
-                        ("human", ANALYSIS_PROMPT.format(
-                            analysis_type=analysis_type,
-                            raw_profile=json.dumps(profile_data, indent=2),
-                            optional_data="{}",
-                            field_descriptions=get_nested_field_descriptions(model_class),
-                            target_role=state["config"]["target_role"],
-                            model_schema=get_model_schema(model_class)
-                        ))
-                    ])
-                    response = llm.invoke(prompt)
-                    result = validate_llm_output(response.content, model_class)
-                    analysis_results[analysis_type] = result
-                except Exception as e:
-                    logging.error(f"Feil i {analysis_type} analyse: {str(e)}")
+            # Kjør én samlet analyse
+            messages = [
+                SystemMessage(content=ANALYSIS_SYSTEM_PROMPT),
+                HumanMessage(content=ANALYSIS_PROMPT.format(
+                    raw_profile=json.dumps(profile_data, indent=2),
+                    target_role=state["config"]["target_role"],
+                    model_schema=get_model_schema(User)
+                ))
+            ]
+            response = llm.invoke(messages)
+            if isinstance(response, AIMessage):
+                analysis_results = validate_llm_output(response.content, User)
+            else:
+                raise ValueError(f"Uventet respons type: {type(response)}")
             
             analyzed_user = {
                 **user,
-                "analysis": analysis_results,
+                **analysis_results,  # Flater ut analysen direkte i bruker-objektet
                 "sources": user["sources"] + ["analyzed"]
             }
             analyzed.append(analyzed_user)
-            messages.append(
+            messages.extend([
                 ToolMessage(
                     tool_call_id=f"analyze_{user['email']}",
                     tool_name="analyze",
                     content=f"Analyserte profil for {user['email']}"
-                )
-            )
+                ),
+                AIMessage(content=f"Analyse fullført for {user['email']}")
+            ])
         except Exception as e:
-            messages.append(
+            messages.extend([
                 ToolMessage(
                     tool_call_id=f"analyze_error_{user['email']}",
                     tool_name="analyze",
                     content=f"Feil: {str(e)}"
-                )
-            )
+                ),
+                AIMessage(content=f"Analyse feilet for {user['email']}")
+            ])
     
     return {
         "messages": state["messages"] + messages,

@@ -1,9 +1,8 @@
+langchain
+langgraph
+langchain-openai
+openai
 fastapi
 uvicorn
-langchain
-langchain_openai
-langgraph
-openai
 python-dotenv
-requests
 pydantic

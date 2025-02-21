@@ -55,35 +55,6 @@ class AgentState(TypedDict):
     config: SearchConfig
     users: List[Dict[str, Any]]
 
-class AnalysisTask(BaseModel):
-    """Representerer en enkelt analyseoppgave"""
-    task_id: str = Field(..., description="Unik identifikator for oppgaven")
-    user_email: str = Field(..., description="Email til brukeren som skal analyseres")
-    analysis_type: str = Field(..., description="Type analyse som skal utføres")
-    target_role: str = Field(..., description="Målrollen for analysen")
-    priority: int = Field(default=1, description="Prioritet (1-5)", ge=1, le=5)
-    
-    @validator('analysis_type')
-    def validate_analysis_type(cls, v):
-        valid_types = ['basic', 'career', 'personality', 'network', 'complete']
-        if v not in valid_types:
-            raise ValueError(f'Ugyldig analysetype. Må være en av: {valid_types}')
-        return v
-
-class AnalysisQueue(BaseModel):
-    """Håndterer køen av analyseoppgaver"""
-    tasks: List[AnalysisTask] = Field(default_factory=list)
-    max_concurrent: int = Field(default=3, description="Maks samtidige analyser")
-    
-    def add_task(self, task: AnalysisTask):
-        """Legger til en ny oppgave i køen"""
-        self.tasks.append(task)
-        self.tasks.sort(key=lambda x: x.priority, reverse=True)
-    
-    def get_next_task(self) -> Optional[AnalysisTask]:
-        """Henter neste oppgave fra køen"""
-        return self.tasks.pop(0) if self.tasks else None
-
 #######################
 # Basis datamodeller
 #######################
@@ -620,15 +591,13 @@ class User(BaseModel):
     email: str
     linkedin_url: Optional[str] = None
     
-    # Analyse-resultater
+    # Analyse-resultater (nå direkte i User-modellen)
     basic_info: Optional[BasicInfo] = None
     career: Optional[CareerInfo] = None
     expertise: Optional[ExpertiseInfo] = None
     education: Optional[EducationInfo] = None
     network: Optional[NetworkInfo] = None
     personality: Optional[PersonalityInfo] = None
-    
-    # Meta-informasjon
     meta: Optional[MetaInfo] = None
     
     # Tracking
